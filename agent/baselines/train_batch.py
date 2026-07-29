@@ -39,6 +39,21 @@ VALID_MODES = ("short", "long", "hybrid", "fixed_hybrid")
 ALL_MONTHS = list(range(1, 13))
 
 
+def month_seed(base_seed: int, month: int) -> int:
+    return int(base_seed) + int(month) - 1
+
+
+def build_training_args(module, mode: str, month: int, episodes: int | None = None):
+    parser = module.build_parser()
+    args, _ = parser.parse_known_args([])
+    args.mode = mode
+    args.month = month
+    args.seed = month_seed(args.seed, month)
+    if episodes is not None:
+        args.episodes = int(episodes)
+    return args
+
+
 # ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
@@ -134,14 +149,7 @@ def run_one(algorithm: str, mode: str, month: int, episodes: int | None = None) 
     try:
         # Dynamically import the algorithm module
         module = importlib.import_module(f"agent.baselines.{algorithm}")
-        # Parse default args and override mode / month
-        parser = module.build_parser()
-        args_list = []
-        if episodes is not None:
-            args_list.extend(["--episodes", str(episodes)])
-        args, _ = parser.parse_known_args(args_list)
-        args.mode = mode
-        args.month = month
+        args = build_training_args(module, mode, month, episodes)
 
         module.train(args)
 
@@ -194,11 +202,21 @@ def main() -> None:
 
     # --- Dry-run ---
     if args.dry_run:
-        print(f"{'#':>3}  {'algorithm':>10}  {'mode':>14}  {'month':>5}  {'episodes':>9}")
-        print("-" * 55)
+        from agent.baselines.common import DEFAULT_PARAMETERS
+
+        base_seed = int(DEFAULT_PARAMETERS["experiment"]["seed"])
+        print(
+            f"{'#':>3}  {'algorithm':>10}  {'mode':>14}  "
+            f"{'month':>5}  {'seed':>6}  {'episodes':>9}"
+        )
+        print("-" * 65)
         for i, t in enumerate(tasks, 1):
             ep_str = str(t["episodes"]) if t["episodes"] else "default"
-            print(f"{i:>3}  {t['algorithm']:>10}  {t['mode']:>14}  {t['month']:>5}  {ep_str:>9}")
+            task_seed = month_seed(base_seed, t["month"])
+            print(
+                f"{i:>3}  {t['algorithm']:>10}  {t['mode']:>14}  "
+                f"{t['month']:>5}  {task_seed:>6}  {ep_str:>9}"
+            )
         return
 
     # --- Sequential ---

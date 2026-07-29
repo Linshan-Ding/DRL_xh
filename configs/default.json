@@ -121,6 +121,9 @@
       "max_days": "short、hybrid 和 fixed_hybrid 模式下单个 episode 的最大决策天数。",
       "fixed_hybrid": "固定长租+短租模式配置；第一天按人工参数创建长租资源，后续天数由算法调整短租资源。",
       "action_scale": "baseline 连续动作映射到环境整数调整量时使用的缩放系数。",
+      "long_robot_max": "baseline 在 long 模式和 hybrid 首次决策中允许配置的最大长租机器人数量。",
+      "long_picker_max": "baseline 在 long 模式和 hybrid 首次决策中允许为单个区域配置的最大长租拣货员数量。",
+      "deterministic_tail_fraction": "baseline 训练末段关闭探索、直接使用确定性策略的 episode 比例。",
       "device": "训练设备；auto 表示自动选择 cuda 或 cpu。",
       "visdom": "是否默认启用 Visdom 可视化。"
     },
@@ -143,6 +146,9 @@
       "long_term_pickers_area": [1, 1, 1]
     },
     "action_scale": 5,
+    "long_robot_max": 15,
+    "long_picker_max": 5,
+    "deterministic_tail_fraction": 0.1,
     "device": "auto",
     "visdom": true
   },

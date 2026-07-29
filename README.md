@@ -80,6 +80,17 @@ python agent\baselines\td3.py --policy-delay 2
 python agent\baselines\sac.py --alpha-lr 0.0003
 ```
 
+四个对比算法（A2C / DDPG / TD3 / SAC）使用与 PPO 相同的状态归一化尺度，但不会修改或覆盖 PPO 实现及其已有结果。长租模式的主要训练规则如下：
+
+- A2C 跨 64 个单步 episode 累积一个更新批次，避免单样本 advantage 归零。
+- DDPG / TD3 / SAC 在 64 个 transition 后结束随机探索阶段，第 65 个长租 episode 起使用 actor。
+- long 模式和 hybrid 第一次决策的动作表示绝对资源数；机器人范围为 1~15，每个区域的拣货员范围为 1~5。
+- 最后 10% episode 关闭探索并冻结参数更新，训练 CSV 尾段直接反映最终确定性策略。
+- baseline 不执行独立评估，也不保存模型 checkpoint；结果来自逐 episode CSV 和训练过程生成的 `_best_config.csv`。
+- `_best_config.csv` 只从最后 10% 的确定性收敛段中选择，不使用前期随机探索的偶然最小成本。
+
+`--learning-starts` 可调整 DDPG / TD3 / SAC 的随机探索 transition 数；旧参数名 `--warmup-steps` 作为兼容别名继续可用。
+
 ## Modes
 
 `configs/default.json` 中的 `experiment.mode` 支持：
@@ -196,6 +207,8 @@ python -m agent.baselines.train_batch --algorithm sac --mode fixed_hybrid --dry-
 - PPO best resource configuration: `result/ppo/<mode>_i<items>_m<month>_seed<seed>_best_config.csv`
 - Baselines: `result/baselines/<algorithm>_<mode>_i<items>_m<month>_seed<seed>.csv`
 - Baseline best resource configuration: `result/baselines/<algorithm>_<mode>_i<items>_m<month>_seed<seed>_best_config.csv`
+
+批量运行 baseline 时，月份 `m` 使用 `experiment.seed + m - 1` 作为训练 seed；三个 off-policy 算法和 A2C 在同一月份仍使用相同 seed，保证横向比较可复现。
 
 ## Tests
 

@@ -12,6 +12,7 @@ from agent.baselines.common import (
     CsvLogger,
     QNetwork,
     ReplayBuffer,
+    RunningRewardNormalizer,
     SquashedGaussianActor,
     add_common_args,
     best_config_path,
@@ -25,15 +26,16 @@ from agent.baselines.common import (
     make_visdom,
     max_decisions,
     normalized_to_env_action,
-    output_paths,
+    output_path,
     print_episode,
     print_config_source,
-    save_checkpoint,
     set_seed,
     soft_update,
     state_to_arrays,
     state_to_tensors,
     step_env,
+    use_deterministic_action,
+    use_random_action,
     write_best_config_csv,
 )
 
@@ -48,7 +50,14 @@ def build_parser():
     parser.add_argument("--tau", type=float, default=0.005)
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--buffer-size", type=int, default=100000)
-    parser.add_argument("--warmup-steps", type=int, default=1000)
+    parser.add_argument(
+        "--learning-starts",
+        "--warmup-steps",
+        dest="learning_starts",
+        type=int,
+        default=64,
+    )
+    parser.add_argument("--max-grad-norm", type=float, default=0.5)
     return parser
 
 
@@ -65,10 +74,15 @@ def update_sac(
     alpha_optimizer,
     target_entropy,
     buffer,
+    reward_normalizer,
     args,
     device,
 ):
-    matrix, scalar, action, reward, next_matrix, next_scalar, done = buffer.sample(args.batch_size, device)
+    matrix, scalar, action, reward, next_matrix, next_scalar, done = buffer.sample(
+        args.batch_size,
+        device,
+        reward_normalizer,
+    )
     alpha = log_alpha.exp()
 
     with torch.no_grad():
@@ -81,11 +95,13 @@ def update_sac(
     critic1_loss = nn.functional.mse_loss(critic1(matrix, scalar, action), target)
     critic1_optimizer.zero_grad()
     critic1_loss.backward()
+    nn.utils.clip_grad_norm_(critic1.parameters(), args.max_grad_norm)
     critic1_optimizer.step()
 
     critic2_loss = nn.functional.mse_loss(critic2(matrix, scalar, action), target)
     critic2_optimizer.zero_grad()
     critic2_loss.backward()
+    nn.utils.clip_grad_norm_(critic2.parameters(), args.max_grad_norm)
     critic2_optimizer.step()
 
     new_action, log_prob = actor.sample(matrix, scalar)
@@ -94,6 +110,7 @@ def update_sac(
     actor_loss = (alpha.detach() * log_prob - torch.minimum(q1_new, q2_new)).mean()
     actor_optimizer.zero_grad()
     actor_loss.backward()
+    nn.utils.clip_grad_norm_(actor.parameters(), args.max_grad_norm)
     actor_optimizer.step()
 
     alpha_loss = -(log_alpha * (log_prob + target_entropy).detach()).mean()
@@ -132,13 +149,15 @@ def train(args):
     alpha_optimizer = optim.Adam([log_alpha], lr=args.alpha_lr)
     target_entropy = -float(action_dim)
     buffer = ReplayBuffer(args.buffer_size, matrix_shape, scalar_dim, action_dim)
+    reward_normalizer = RunningRewardNormalizer()
 
-    csv_path, model_path = output_paths(args, "sac")
+    csv_path = output_path(args, "sac")
     best_config_csv_path = best_config_path(args, "sac")
     logger = CsvLogger(csv_path)
     viz, win = make_visdom(args, "sac")
     best_cost = math.inf
     global_step = 0
+    write_best_config_csv(best_config_csv_path, [])
 
     try:
         for episode in range(1, args.episodes + 1):
@@ -156,14 +175,29 @@ def train(args):
                 if done:
                     break
                 matrix_np, scalar_np = state_to_arrays(state)
-                if global_step < args.warmup_steps:
+                deterministic = use_deterministic_action(
+                    episode,
+                    args.episodes,
+                    args.deterministic_tail_fraction,
+                )
+                if use_random_action(global_step, args.learning_starts):
                     action_norm = np.random.uniform(-1, 1, size=action_dim).astype(np.float32)
                 else:
                     matrix, scalar = state_to_tensors(state, device)
-                    action_norm, _ = actor.sample(matrix, scalar)
+                    if deterministic:
+                        action_norm = actor.deterministic(matrix, scalar)
+                    else:
+                        action_norm, _ = actor.sample(matrix, scalar)
                     action_norm = action_norm.detach().cpu().numpy()[0]
 
-                env_action = normalized_to_env_action(action_norm, args.action_scale)
+                env_action = normalized_to_env_action(
+                    action_norm,
+                    args.action_scale,
+                    args.mode,
+                    decision,
+                    args.long_robot_max,
+                    args.long_picker_max,
+                )
                 decision_start_time = env.current_time
                 next_state, reward, done = step_env(env, env_action, args.mode, decision)
                 terminal = done or decision == decision_limit - 1
@@ -184,25 +218,39 @@ def train(args):
                     )
                 )
                 next_matrix_np, next_scalar_np = state_to_arrays(next_state)
-                buffer.add(matrix_np, scalar_np, action_norm, float(reward), next_matrix_np, next_scalar_np, terminal)
-
-                if buffer.size >= args.batch_size:
-                    update_sac(
-                        actor,
-                        critic1,
-                        critic2,
-                        critic1_target,
-                        critic2_target,
-                        actor_optimizer,
-                        critic1_optimizer,
-                        critic2_optimizer,
-                        log_alpha,
-                        alpha_optimizer,
-                        target_entropy,
-                        buffer,
-                        args,
-                        device,
+                if not deterministic:
+                    reward_normalizer.update(float(reward))
+                    buffer.add(
+                        matrix_np,
+                        scalar_np,
+                        action_norm,
+                        float(reward),
+                        next_matrix_np,
+                        next_scalar_np,
+                        terminal,
                     )
+
+                    if (
+                        buffer.size >= args.batch_size
+                        and global_step + 1 >= args.learning_starts
+                    ):
+                        update_sac(
+                            actor,
+                            critic1,
+                            critic2,
+                            critic1_target,
+                            critic2_target,
+                            actor_optimizer,
+                            critic1_optimizer,
+                            critic2_optimizer,
+                            log_alpha,
+                            alpha_optimizer,
+                            target_entropy,
+                            buffer,
+                            reward_normalizer,
+                            args,
+                            device,
+                        )
 
                 state = next_state
                 global_step += 1
@@ -214,13 +262,9 @@ def train(args):
             viz.line([metrics["total_cost"]], [episode], win=win, update="append")
             print_episode("sac", metrics)
 
-            if metrics["total_cost"] < best_cost:
+            best_candidate = deterministic or args.deterministic_tail_fraction == 0
+            if best_candidate and metrics["total_cost"] < best_cost:
                 best_cost = metrics["total_cost"]
-                save_checkpoint(
-                    model_path,
-                    {"actor": actor, "critic1": critic1, "critic2": critic2},
-                    {**vars(args), "alpha": float(log_alpha.exp().detach().cpu().item())},
-                )
                 write_best_config_csv(best_config_csv_path, episode_config_rows)
     finally:
         logger.close()

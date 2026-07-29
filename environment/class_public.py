@@ -63,6 +63,13 @@ def validate_config(parameters: Mapping[str, Any]) -> None:
         raise ValueError("experiment.episodes must be positive")
     if int(experiment["max_days"]) <= 0:
         raise ValueError("experiment.max_days must be positive")
+    if int(experiment["long_robot_max"]) < 1:
+        raise ValueError("experiment.long_robot_max must be at least 1")
+    if int(experiment["long_picker_max"]) < 1:
+        raise ValueError("experiment.long_picker_max must be at least 1")
+    deterministic_tail_fraction = float(experiment["deterministic_tail_fraction"])
+    if not 0 <= deterministic_tail_fraction < 1:
+        raise ValueError("experiment.deterministic_tail_fraction must be in [0, 1)")
     if mode == "fixed_hybrid" and int(experiment["max_days"]) < 2:
         raise ValueError("fixed_hybrid mode requires experiment.max_days >= 2")
 

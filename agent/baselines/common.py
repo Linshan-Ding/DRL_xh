@@ -30,9 +30,8 @@ from agent.training_utils import (  # noqa: E402
     make_episode_env,
     make_visdom as _make_visdom,
     max_decisions,
-    output_paths as _output_paths,
     print_episode,
-    save_checkpoint,
+    repo_path,
     set_seed,
     step_env,
     write_best_config_csv,
@@ -61,15 +60,20 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         output_dir=paths["baseline_output_dir"],
         visdom=experiment["visdom"],
         action_scale=experiment["action_scale"],
+        long_robot_max=experiment["long_robot_max"],
+        long_picker_max=experiment["long_picker_max"],
+        deterministic_tail_fraction=experiment["deterministic_tail_fraction"],
         max_days=experiment["max_days"],
         device=resolve_device(experiment["device"]),
     )
     return parser
 
 
-def output_paths(args: argparse.Namespace, algorithm: str) -> tuple[Path, Path]:
+def output_path(args: argparse.Namespace, algorithm: str) -> Path:
     stem = f"{algorithm}_{case_stem(args.mode, args.items, args.month, args.seed)}"
-    return _output_paths(args.output_dir, stem)
+    output_dir = repo_path(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    return output_dir / f"{stem}.csv"
 
 
 def best_config_path(args: argparse.Namespace, algorithm: str) -> Path:
@@ -117,6 +121,29 @@ def state_to_arrays(state: dict) -> tuple[np.ndarray, np.ndarray]:
         axis=0,
     ).astype(np.float32)
     scalar = np.asarray([state["n_robots"]] + list(state["n_pickers_area"]), dtype=np.float32)
+    warehouse = DEFAULT_PARAMETERS["warehouse"]
+    order = DEFAULT_PARAMETERS["order"]
+    pick_points_total = max(
+        1,
+        int(warehouse["area_num"])
+        * int(warehouse["aisle_num"])
+        * int(warehouse["shelf_capacity"]),
+    )
+    pick_points_per_area = max(
+        1,
+        int(warehouse["aisle_num"]) * int(warehouse["shelf_capacity"]),
+    )
+    max_order_items = max(1, int(max(order["order_n_items"])))
+    matrix_scale = np.asarray(
+        [pick_points_total, 1.0, max_order_items],
+        dtype=np.float32,
+    ).reshape(3, 1, 1)
+    scalar_scale = np.asarray(
+        [pick_points_total] + [pick_points_per_area] * int(warehouse["area_num"]),
+        dtype=np.float32,
+    )
+    matrix = matrix / matrix_scale
+    scalar = scalar / scalar_scale
     return matrix, scalar
 
 
@@ -128,10 +155,76 @@ def state_to_tensors(state: dict, device: torch.device) -> tuple[torch.Tensor, t
     )
 
 
-def normalized_to_env_action(action: np.ndarray, action_scale: int) -> np.ndarray:
+def normalized_to_env_action(
+    action: np.ndarray,
+    action_scale: int,
+    mode: str = "short",
+    decision_index: int = 0,
+    long_robot_max: int = 15,
+    long_picker_max: int = 5,
+) -> np.ndarray:
     clipped = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+    absolute_long_action = mode == "long" or (mode == "hybrid" and decision_index == 0)
+    if absolute_long_action:
+        maximums = np.asarray(
+            [long_robot_max] + [long_picker_max] * (len(clipped) - 1),
+            dtype=np.float32,
+        )
+        scaled = 1.0 + (clipped + 1.0) * 0.5 * (maximums - 1.0)
+        return np.rint(scaled).astype(np.float32)
     scaled = np.rint(clipped * action_scale)
     return np.clip(scaled, -action_scale, action_scale).astype(np.float32)
+
+
+def use_deterministic_action(episode: int, total_episodes: int, tail_fraction: float) -> bool:
+    if not 0 <= tail_fraction < 1:
+        raise ValueError("deterministic_tail_fraction must be in [0, 1)")
+    deterministic_start = max(1, int(np.floor(total_episodes * (1.0 - tail_fraction))) + 1)
+    return episode >= deterministic_start
+
+
+def use_random_action(global_step: int, learning_starts: int) -> bool:
+    if learning_starts < 0:
+        raise ValueError("learning_starts must be non-negative")
+    return global_step < learning_starts
+
+
+def linear_exploration_scale(
+    global_step: int,
+    total_steps: int,
+    initial_scale: float,
+    final_scale: float,
+    decay_fraction: float,
+) -> float:
+    if not 0 < decay_fraction <= 1:
+        raise ValueError("exploration_decay_fraction must be in (0, 1]")
+    decay_steps = max(1, int(total_steps * decay_fraction))
+    progress = min(max(global_step, 0) / decay_steps, 1.0)
+    return float(initial_scale + progress * (final_scale - initial_scale))
+
+
+class RunningRewardNormalizer:
+    def __init__(self, epsilon: float = 1e-8):
+        self.count = 0
+        self.mean = 0.0
+        self.m2 = 0.0
+        self.epsilon = epsilon
+
+    def update(self, reward: float) -> None:
+        self.count += 1
+        delta = reward - self.mean
+        self.mean += delta / self.count
+        delta2 = reward - self.mean
+        self.m2 += delta * delta2
+
+    @property
+    def std(self) -> float:
+        if self.count < 2:
+            return 1.0
+        return max(float(np.sqrt(self.m2 / self.count)), self.epsilon)
+
+    def normalize(self, rewards: torch.Tensor) -> torch.Tensor:
+        return (rewards - self.mean) / self.std
 
 
 class StateEncoder(nn.Module):
@@ -284,13 +377,21 @@ class ReplayBuffer:
         self.ptr = (self.ptr + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
-    def sample(self, batch_size: int, device: torch.device):
+    def sample(
+        self,
+        batch_size: int,
+        device: torch.device,
+        reward_normalizer: RunningRewardNormalizer | None = None,
+    ):
         idx = np.random.randint(0, self.size, size=batch_size)
+        rewards = torch.as_tensor(self.reward[idx], dtype=torch.float32, device=device)
+        if reward_normalizer is not None:
+            rewards = reward_normalizer.normalize(rewards)
         return (
             torch.as_tensor(self.matrix[idx], dtype=torch.float32, device=device),
             torch.as_tensor(self.scalar[idx], dtype=torch.float32, device=device),
             torch.as_tensor(self.action[idx], dtype=torch.float32, device=device),
-            torch.as_tensor(self.reward[idx], dtype=torch.float32, device=device),
+            rewards,
             torch.as_tensor(self.next_matrix[idx], dtype=torch.float32, device=device),
             torch.as_tensor(self.next_scalar[idx], dtype=torch.float32, device=device),
             torch.as_tensor(self.done[idx], dtype=torch.float32, device=device),

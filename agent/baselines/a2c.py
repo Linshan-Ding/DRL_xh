@@ -22,13 +22,13 @@ from agent.baselines.common import (
     make_visdom,
     max_decisions,
     normalized_to_env_action,
-    output_paths,
+    output_path,
     print_episode,
     print_config_source,
-    save_checkpoint,
     set_seed,
     state_to_tensors,
     step_env,
+    use_deterministic_action,
     write_best_config_csv,
 )
 
@@ -42,6 +42,7 @@ def build_parser():
     parser.add_argument("--entropy-coef", type=float, default=0.01)
     parser.add_argument("--value-coef", type=float, default=0.5)
     parser.add_argument("--max-grad-norm", type=float, default=0.5)
+    parser.add_argument("--batch-size", type=int, default=64)
     return parser
 
 
@@ -52,8 +53,18 @@ def compute_gae(rewards, dones, values, next_value, gamma, gae_lambda, device):
     next_v = next_value.detach().view(1)
     values_detached = values.detach().view(-1)
 
-    for step in reversed(range(len(rewards))):
-        reward = torch.tensor([rewards[step]], dtype=torch.float32, device=device)
+    rewards_tensor = torch.as_tensor(rewards, dtype=torch.float32, device=device)
+    if rewards_tensor.numel() > 1:
+        rewards_tensor = rewards_tensor - rewards_tensor.mean()
+        reward_std = rewards_tensor.std(unbiased=False)
+        if reward_std > 1e-8:
+            rewards_tensor = rewards_tensor / (reward_std + 1e-8)
+    elif rewards_tensor.numel() == 1:
+        reward_scale = rewards_tensor.abs().clamp_min(1.0)
+        rewards_tensor = rewards_tensor / reward_scale
+
+    for step in reversed(range(len(rewards_tensor))):
+        reward = rewards_tensor[step].view(1)
         done = torch.tensor([float(dones[step])], dtype=torch.float32, device=device)
         value = values_detached[step].view(1)
         delta = reward + gamma * next_v * (1 - done) - value
@@ -67,6 +78,60 @@ def compute_gae(rewards, dones, values, next_value, gamma, gae_lambda, device):
     if advantages.numel() > 1 and advantages.std() > 1e-8:
         advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     return advantages, returns
+
+
+def update_a2c(
+    actor,
+    value_net,
+    optimizer,
+    mse_loss,
+    log_probs,
+    entropies,
+    values,
+    rewards,
+    dones,
+    next_value,
+    entropy_coef,
+    args,
+    device,
+) -> None:
+    if not rewards:
+        return
+    values_t = torch.stack(values)
+    log_probs_t = torch.stack(log_probs)
+    entropies_t = torch.stack(entropies)
+    advantages, returns = compute_gae(
+        rewards,
+        dones,
+        values_t,
+        next_value,
+        args.gamma,
+        args.gae_lambda,
+        device,
+    )
+
+    policy_loss = -(log_probs_t * advantages.detach()).mean()
+    value_loss = mse_loss(values_t, returns.detach())
+    entropy_loss = -entropies_t.mean()
+    loss = policy_loss + args.value_coef * value_loss + entropy_coef * entropy_loss
+
+    optimizer.zero_grad()
+    loss.backward()
+    nn.utils.clip_grad_norm_(
+        list(actor.parameters()) + list(value_net.parameters()),
+        args.max_grad_norm,
+    )
+    optimizer.step()
+
+
+def empty_rollout() -> dict[str, list]:
+    return {
+        "log_probs": [],
+        "entropies": [],
+        "values": [],
+        "rewards": [],
+        "dones": [],
+    }
 
 
 def train(args):
@@ -85,16 +150,36 @@ def train(args):
     optimizer = optim.Adam(list(actor.parameters()) + list(value_net.parameters()), lr=args.lr)
     mse_loss = nn.MSELoss()
 
-    csv_path, model_path = output_paths(args, "a2c")
+    csv_path = output_path(args, "a2c")
     best_config_csv_path = best_config_path(args, "a2c")
     logger = CsvLogger(csv_path)
     viz, win = make_visdom(args, "a2c")
     best_cost = math.inf
+    long_rollout = empty_rollout()
+    write_best_config_csv(best_config_csv_path, [])
 
     try:
         for episode in range(1, args.episodes + 1):
             env, state = make_episode_env(base_env, orders)
             log_probs, entropies, values, rewards, dones = [], [], [], [], []
+            deterministic = use_deterministic_action(
+                episode,
+                args.episodes,
+                args.deterministic_tail_fraction,
+            )
+            if deterministic and long_rollout["rewards"]:
+                update_a2c(
+                    actor,
+                    value_net,
+                    optimizer,
+                    mse_loss,
+                    **long_rollout,
+                    next_value=torch.zeros(1, device=device),
+                    entropy_coef=0.0,
+                    args=args,
+                    device=device,
+                )
+                long_rollout = empty_rollout()
             state, done, first_decision_index, episode_config_rows = initialize_episode_resources(
                 env,
                 args.mode,
@@ -112,7 +197,7 @@ def train(args):
                 matrix, scalar = state_to_tensors(state, device)
                 mean, std = actor(matrix, scalar)
                 dist = torch.distributions.Normal(mean, std)
-                raw_action = dist.sample()
+                raw_action = mean if deterministic else dist.sample()
                 action_norm_t = torch.tanh(raw_action)
                 log_prob = (
                     dist.log_prob(raw_action) - torch.log(1 - action_norm_t.pow(2) + 1e-6)
@@ -121,7 +206,14 @@ def train(args):
                 value = value_net(matrix, scalar).squeeze(-1)
 
                 action_norm = action_norm_t.detach().cpu().numpy()[0]
-                env_action = normalized_to_env_action(action_norm, args.action_scale)
+                env_action = normalized_to_env_action(
+                    action_norm,
+                    args.action_scale,
+                    args.mode,
+                    decision,
+                    args.long_robot_max,
+                    args.long_picker_max,
+                )
                 decision_start_time = env.current_time
                 next_state, reward, done = step_env(env, env_action, args.mode, decision)
                 terminal = done or decision == decision_limit - 1
@@ -151,7 +243,30 @@ def train(args):
                 if terminal:
                     break
 
-            if rewards:
+            if rewards and not deterministic and args.mode == "long":
+                long_rollout["log_probs"].extend(log_probs)
+                long_rollout["entropies"].extend(entropies)
+                long_rollout["values"].extend(values)
+                long_rollout["rewards"].extend(rewards)
+                long_rollout["dones"].extend(dones)
+                if len(long_rollout["rewards"]) >= args.batch_size:
+                    entropy_coef = args.entropy_coef * max(
+                        0.0,
+                        1.0 - episode / max(1, args.episodes),
+                    )
+                    update_a2c(
+                        actor,
+                        value_net,
+                        optimizer,
+                        mse_loss,
+                        **long_rollout,
+                        next_value=torch.zeros(1, device=device),
+                        entropy_coef=entropy_coef,
+                        args=args,
+                        device=device,
+                    )
+                    long_rollout = empty_rollout()
+            elif rewards and not deterministic:
                 with torch.no_grad():
                     if terminal:
                         next_value = torch.zeros(1, device=device)
@@ -159,32 +274,47 @@ def train(args):
                         matrix, scalar = state_to_tensors(state, device)
                         next_value = value_net(matrix, scalar).squeeze(-1)
 
-                values_t = torch.stack(values)
-                log_probs_t = torch.stack(log_probs)
-                entropies_t = torch.stack(entropies)
-                advantages, returns = compute_gae(
-                    rewards, dones, values_t, next_value, args.gamma, args.gae_lambda, device
+                entropy_coef = args.entropy_coef * max(
+                    0.0,
+                    1.0 - episode / max(1, args.episodes),
                 )
-
-                policy_loss = -(log_probs_t * advantages.detach()).mean()
-                value_loss = mse_loss(values_t, returns.detach())
-                entropy_loss = -entropies_t.mean()
-                loss = policy_loss + args.value_coef * value_loss + args.entropy_coef * entropy_loss
-
-                optimizer.zero_grad()
-                loss.backward()
-                nn.utils.clip_grad_norm_(list(actor.parameters()) + list(value_net.parameters()), args.max_grad_norm)
-                optimizer.step()
+                update_a2c(
+                    actor,
+                    value_net,
+                    optimizer,
+                    mse_loss,
+                    log_probs,
+                    entropies,
+                    values,
+                    rewards,
+                    dones,
+                    next_value,
+                    entropy_coef,
+                    args,
+                    device,
+                )
 
             metrics = collect_metrics(env, episode, args.items, args.month, args.mode, args.seed)
             logger.write(metrics)
             viz.line([metrics["total_cost"]], [episode], win=win, update="append")
             print_episode("a2c", metrics)
 
-            if metrics["total_cost"] < best_cost:
+            best_candidate = deterministic or args.deterministic_tail_fraction == 0
+            if best_candidate and metrics["total_cost"] < best_cost:
                 best_cost = metrics["total_cost"]
-                save_checkpoint(model_path, {"actor": actor, "value": value_net}, vars(args))
                 write_best_config_csv(best_config_csv_path, episode_config_rows)
+        if long_rollout["rewards"]:
+            update_a2c(
+                actor,
+                value_net,
+                optimizer,
+                mse_loss,
+                **long_rollout,
+                next_value=torch.zeros(1, device=device),
+                entropy_coef=0.0,
+                args=args,
+                device=device,
+            )
     finally:
         logger.close()
 
