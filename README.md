@@ -1,221 +1,57 @@
 # DRL_Warehouse
 
-> **Paper:** *The Impact of Dynamic Workforce Allocation in Human-Robot Collaborative Warehouses: A Human-Centric Perspective*
+Paper Title: **The Impact of Dynamic Workforce Allocation in Human-Robot Collaborative Warehouses: A Human-Centric Perspective**
 
-基于深度强化学习的人机协同仓库动态资源配置研究。项目以拣选仓库为背景，将机器人搬运与拣货员协助相结合的拣选流程建模为序列决策问题，使用 PPO 及其变体（A2C / DDPG / TD3 / SAC）联合优化各作业区域的机器人数量和拣货员数量，在最小化运营成本（机器人运行 + 拣货员雇佣 + 订单延期惩罚）的同时保证订单履约率。
+本项目用于研究人机协同仓库中的动态资源配置问题，包含统一配置、订单算例生成、PPO 训练入口，以及 A2C / DDPG / TD3 / SAC 对比算法。
 
----
+## Configuration
 
-## 仓库环境建模
+`configs/default.json` 是项目中已有配置参数的唯一数值来源。训练模式、算例、episode、随机种子、路径、设备、PPO 参数、仓库参数、成本参数和 `fixed_hybrid` 固定长租参数都只能通过修改该文件控制。
 
-### 物理布局
-
-仓库由 3 个作业区域（`area_num=3`）组成，每个区域含 3 条巷道（`aisle_num=3`），每条巷道两侧各有 20 个储货位（`shelf_capacity=20`）× 3 层货架（`shelf_levels=3`），即每个拣货位对应 6 个拣货面（`left` / `right` × 3 层），仓库共有 **540 个可拣选货位**。
-
-```
- ┌─────────────────────────────────────────────────────┐
- │  Area 1          Area 2          Area 3             │
- │  ┌─┬─┬─┐        ┌─┬─┬─┐        ┌─┬─┬─┐             │
- │  │ │ │ │  ...   │ │ │ │  ...   │ │ │ │  ...        │
- │  └─┴─┴─┘        └─┴─┴─┘        └─┴─┴─┘             │
- │                    ↑ 巷道 (aisle)                    │
- │  ████████████████████████████████████████  Depot     │
- └─────────────────────────────────────────────────────┘
-```
-
-### 作业流程
-
-1. **订单到达** — 按泊松过程随机生成，每个订单包含 2~10 件商品，分布在仓库不同拣货位
-2. **机器人分配订单** — 空闲机器人被分配未分配订单，规划拣货位序列，移动到目标拣货位排队
-3. **拣货员协助** — 拣货员在各区域的待分配拣货位与机器人之间协调，依次为排队机器人拣选商品
-4. **返回 Depot** — 机器人完成所有商品拣选后返回 Depot 打包出库
-5. **订单延期惩罚** — 超过交期（due_time）的订单按秒累计延期成本
-
-### 资源类型
-
-| 资源 | 租赁模式 | 成本构成 |
-|------|----------|----------|
-| **机器人 (Robot)** | 长租 / 短租 | 单位运行时间成本 × 工作时长 |
-| **拣货员 (Picker)** | 长租 / 短租 | 单位时间雇佣成本 × 工作时长 + 解雇固定成本 |
-
-- **长租**：成本低（约短租的 35%~65%），但整个周期不可解雇
-- **短租**：成本高，但可按天灵活增减
-
-### 状态空间
-
-PPO 智能体的观测由两部分组成：
-
-| 输入类型 | 维度 | 含义 |
-|----------|------|------|
-| **矩阵输入** (CNN) | `3 × N_w × N_l` | 通道 0: 各拣货位机器人排队长度; 通道 1: 各拣货位是否有拣货员; 通道 2: 各拣货位未拣选商品数 |
-| **标量输入** (MLP) | `1 + N_a` | 当前机器人总数 + 各区域拣货员数量 |
-
-### 动作空间
-
-连续动作向量维度 `1 + N_a`（4 维），每维 ∈ ℝ，经舍入后映射为整数资源调整量：
-
-- `action[0]`: 机器人增减量（正→新增，负→解雇短租）
-- `action[1]~action[3]`: 各区域拣货员增减量
-
-### 奖励函数
-
-$$r_t = C_{t-1} - C_t$$
-
-其中 $C_t = C_{\text{delay}} + C_{\text{robot}} + C_{\text{picker}}$，即相邻决策步的总成本降低量作为即时奖励。
-
----
-
-## 算法架构
-
-### PPO 网络结构
-
-```
-                  矩阵输入 (3×N_w×N_l)              标量输入 (1+N_a)
-                        │                                │
-                   ┌─ Conv2d(3→16, 3×3) ─┐                │
-                   │      ReLU            │                │
-                   └─ Conv2d(16→32, 3×3) ─┘               │
-                        │  ReLU                           │
-                        │  MaxPool2d(2×2)                 │
-                        │  Flatten                        │
-                        ▼                                │
-                   Visual FC (cnn_out→32)                 │
-                        │  ReLU                           │
-                        └────────┬────────────────────────┘
-                                 ▼
-                        FC Backbone (32+4 → 128)
-                        LayerNorm + ReLU
-                        FC (128 → 128) + ReLU
-                                 │
-                     ┌───────────┴───────────┐
-                     │  MultiHeadAttention   │
-                     │  (4 heads, dim=128)   │
-                     │  + Residual + LN      │
-                     └───────────┬───────────┘
-                    ┌────────────┴────────────┐
-                    ▼                         ▼
-            Action Mean (128→4)        Value Head (128→1)
-            Action LogStd (可学习参数)
-                    │
-                    ▼
-            Normal(mean, std) → 采样动作
-```
-
-- **CNN 编码器**: 双层卷积提取拣货位空间特征
-- **Multi-Head Self-Attention**: 捕获各拣货位之间的全局依赖关系
-- **Orthogonal 初始化**: 所有线性层使用正交初始化，保证训练初期的梯度稳定性
-- **可学习 LogStd**: 策略标准差随训练自适应调节
-
-### Baseline 算法对比
-
-| 算法 | 类型 | Actor | Critic |
-|------|------|-------|--------|
-| **A2C** | On-Policy, Stochastic | 共享 CNN + Gaussian Policy | 共享 CNN + Value Head |
-| **DDPG** | Off-Policy, Deterministic | 共享 CNN + Tanh 输出 | 共享 CNN + Q-Network（含动作输入） |
-| **TD3** | Off-Policy, Deterministic | 双 Q 网络 + 目标网络平滑 | 策略延迟更新 |
-| **SAC** | Off-Policy, Stochastic | Squashed Gaussian Policy | 双 Q 网络 + 可学习 α |
-
-所有 Baseline 共享 `StateEncoder`（与 PPO 的 CNN Backbone 结构一致），使用 Replay Buffer 和 Soft Update。
-
----
-
-## 训练模式
-
-`configs/default.json` 中 `experiment.mode` 支持 4 种模式：
-
-| 模式 | 决策次数 | 说明 |
-|------|----------|------|
-| `short` | 每天 1 次 × `max_days` | 纯短租，每日调整所有资源 |
-| `long` | 仅 1 次 | 一次性决定全周期资源，资源租赁贯穿始终 |
-| `hybrid` | 每天 1 次 × `max_days` | 首日按算法输出分配资源（可混合长/短租），后续每日仅调整短租资源 |
-| `fixed_hybrid` | 每天 1 次 | 首日按 `fixed_hybrid` 预设值固定创建长租，后续每日由算法调整短租资源 |
-
----
-
-## 项目结构
-
-```text
-DRL_Warehouse/
-├── configs/
-│   └── default.json              # 唯一全局配置文件（所有参数均在此维护）
-├── environment/
-│   ├── class_public.py           # Config 基类、配置加载/校验
-│   ├── class_warehouse.py        # 实体类：Order, Item, Robot, Picker, PickPoint, StorageBin
-│   └── warehouse_env.py          # Gymnasium 环境：WarehouseEnv
-├── agent/
-│   ├── ppo/
-│   │   ├── train.py              # PPO 训练入口
-│   │   ├── train_batch.py        # PPO 批量训练（多算例×多月份）
-│   │   ├── train_fixed_hybrid.py  # Fixed Hybrid 模式训练入口
-│   │   ├── agent.py              # PPOAgent：select_action / update / GAE
-│   │   ├── networks.py           # PolicyNetwork + ValueNetwork
-│   │   └── buffer.py             # RolloutBuffer（On-Policy 经验存储）
-│   ├── baselines/
-│   │   ├── common.py             # 共享模块：StateEncoder, ReplayBuffer, Q-Network 等
-│   │   ├── a2c.py                # Advantage Actor-Critic
-│   │   ├── ddpg.py               # Deep Deterministic Policy Gradient
-│   │   ├── td3.py                # Twin Delayed DDPG
-│   │   ├── sac.py                # Soft Actor-Critic
-│   │   └── train_batch.py        # Baseline 批量训练入口
-│   └── training_utils.py         # 训练工具：指标收集、CSV 日志、Visdom、checkpoint
-├── data/
-│   ├── generate_orders.py        # 订单生成器（泊松到达过程）
-│   └── instances/                # items_<n>/orders_m<month>.pkl（48 个实例）
-├── test/
-│   ├── test_PPO_I.py             # 配置文件完整性测试
-│   ├── test_PPO_II.py            # 环境基础功能测试
-│   ├── test_PPO_III.py           # PPO 训练集成测试
-│   └── test_best_config.py       # 最佳配置输出测试
-└── result/                       # 实验结果输出目录（gitignore）
-    ├── ppo/                      # PPO 训练结果
-    └── baselines/                # Baseline 训练结果
-```
-
----
-
-## 环境配置
-
-### 依赖安装
-
-```powershell
-cd DRL_Warehouse
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install torch numpy gymnasium visdom
-```
-
-### 配置文件
-
-`configs/default.json` 是唯一的参数来源，包含以下 8 个部分：
-
-| 节 | 说明 |
-|----|------|
-| `warehouse` | 仓库物理参数（区域数、巷道数、货架容量、尺寸） |
-| `robot` | 机器人成本与速度参数 |
-| `picker` | 拣货员成本、速度与解雇费用 |
-| `order` | 订单延迟成本、打包时间、到达过程参数 |
-| `item` | 单件商品拣选时间 |
-| `ppo` | PPO 超参数（学习率、GAE、裁剪范围、熵系数等） |
-| `experiment` | 训练模式、算例、episode、seed、设备 |
-| `paths` | 数据与输出路径配置 |
-
-运行入口自动打印当前配置来源：
+运行入口会打印当前配置来源：
 
 ```text
 Using config: <repo>/configs/default.json
 ```
 
----
+不再支持 `--config`、`DRL_WAREHOUSE_CONFIG`，也不再支持通过 CLI 覆盖 `default.json` 中已有的参数。
 
-## 使用指南
+## Project Structure
 
-### 1. 生成订单实例
+```text
+DRL_Warehouse/
+├── configs/
+│   ├── default.json                  # 唯一默认配置文件
+│   └── fixed_hybrid_batch.json       # fixed_hybrid 批量训练的逐月长租参数
+├── agent/
+│   ├── ppo/                          # PPO 训练入口与网络
+│   └── baselines/                    # A2C / DDPG / TD3 / SAC 对比算法
+├── data/
+│   ├── generate_orders.py            # 订单算例生成入口
+│   └── instances/                    # items_<n>/orders_m<month>.pkl
+├── environment/                      # 仓库仿真环境与实体定义
+├── test/                             # 轻量测试
+└── result/                           # 实验结果
+```
+
+## Setup
+
+```powershell
+cd DRL_Warehouse
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install torch numpy gymnasium visdom pygame
+```
+
+## Generate Orders
+
+订单商品数范围、月份范围、输出目录和随机种子均来自 `configs/default.json`：
 
 ```powershell
 python -m data.generate_orders
 ```
 
-默认生成 4 种商品数 × 12 个月 = 48 个订单实例（每个 `.pkl` 约 50-90 MB）：
+默认输出结构：
 
 ```text
 data/instances/items_2/orders_m01.pkl  ... orders_m12.pkl
@@ -224,79 +60,146 @@ data/instances/items_6/orders_m01.pkl  ... orders_m12.pkl
 data/instances/items_10/orders_m01.pkl ... orders_m12.pkl
 ```
 
-各月份的订单到达过程由真实月度参数（`generate_orders.MONTH_PARAMS`）驱动，模拟不同季节/月份的订单密度变化。
+## Train PPO
 
-### 2. 训练 PPO
+训练模式、算例、episode、seed、输出目录和设备均来自 `configs/default.json`：
 
 ```powershell
-# 单算例单月训练（参数来自 configs/default.json）
 python -m agent.ppo.train
-
-# 批量训练（遍历所有 items × months 组合）
-python -m agent.ppo.train_batch
-
-# Fixed Hybrid 模式训练
-python -m agent.ppo.train_fixed_hybrid
 ```
 
-训练过程中通过 Visdom 实时可视化总成本曲线（需先启动 `python -m visdom.server`）。
+## Train Baselines
 
-### 3. 训练 Baseline
+baseline 的训练模式、算例、episode、seed、输出目录和设备同样来自 `configs/default.json`。各算法独有超参数仍可通过 CLI 调整：
 
 ```powershell
-# 单独运行（超参数可选 CLI 覆盖）
+python agent\baselines\a2c.py
 python agent\baselines\a2c.py --lr 0.0003
 python agent\baselines\ddpg.py --actor-lr 0.0001 --critic-lr 0.001
 python agent\baselines\td3.py --policy-delay 2
 python agent\baselines\sac.py --alpha-lr 0.0003
-
-# 批量训练
-python -m agent.baselines.train_batch
 ```
 
-### 4. 运行测试
+## Modes
+
+`configs/default.json` 中的 `experiment.mode` 支持：
+
+```text
+short | long | hybrid | fixed_hybrid
+```
+
+`fixed_hybrid` 模式下，第一天按 `experiment.fixed_hybrid.long_term_robots` 和 `experiment.fixed_hybrid.long_term_pickers_area` 创建固定长租资源，后续天数由算法调整短租资源。
+
+## Batch Training
+
+当需要遍历多个月份或多个模式进行实验时，可使用批量训练脚本。两个批量脚本均基于 `ProcessPoolExecutor` 实现多进程并行，每轮训练在独立进程中运行，互不干扰 PyTorch/CUDA 状态。
+
+### PPO Batch: `agent.ppo.train_batch`
+
+遍历 `月份 × 模式` 的组合，对每种组合调用单次 `train()`。默认覆盖 1~12 月 × short / long / hybrid 共 36 个任务。
 
 ```powershell
-python -m unittest discover -s test -p "test_*.py"
+# 顺序执行（默认）
+python -m agent.ppo.train_batch
+
+# 4 进程并行，每个进程限 2 个 CPU 线程
+python -m agent.ppo.train_batch --workers 4 --cpu-threads 2
+
+# 12 进程并行，单线程（适合纯 CPU 环境，避免线程竞争）
+python -m agent.ppo.train_batch --workers 12 --cpu-threads 1
+
+# 指定月份和模式
+python -m agent.ppo.train_batch --months 1,3,5 --modes short,long
+
+# 预览任务列表（不执行训练）
+python -m agent.ppo.train_batch --dry-run
+
+# 强制 CPU 模式（避免多进程抢占同一 GPU）
+python -m agent.ppo.train_batch --workers 4 --force-cpu
 ```
 
----
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--workers` | `2` | 并行进程数 |
+| `--cpu-threads` | `2` | 每个进程的 PyTorch 线程数；高并发时建议设为 `1` |
+| `--force-cpu` | 关闭 | 强制所有进程使用 CPU，通过 `CUDA_VISIBLE_DEVICES=""` 屏蔽 GPU |
+| `--months` | `1,2,...,12` | 逗号分隔的月份列表 |
+| `--modes` | `short,long,hybrid` | 逗号分隔的模式列表（不含 `fixed_hybrid`） |
+| `--dry-run` | 关闭 | 仅打印任务列表，不执行训练 |
 
-## 输出格式
+进程数 × 线程数超过 CPU 核心数时，脚本会打印警告提示。训练结束后输出汇总：成功/失败数量及总耗时。
 
-### 训练指标 CSV (`<stem>.csv`)
+### PPO Fixed Hybrid Batch: `agent.ppo.train_fixed_hybrid`
 
-| 列名 | 含义 |
-|------|------|
-| `episode` | 训练 episode 编号 |
-| `total_cost` | 总成本 = 延期成本 + 机器人成本 + 拣货员成本 |
-| `delay_cost` | 订单延期惩罚成本 |
-| `robot_cost` | 机器人运行成本 |
-| `picker_cost` | 拣货员雇佣成本 |
-| `completed_orders` | 已完成订单数 |
-| `on_time_completed_orders` | 按时完成订单数 |
-| `total_orders` | 到达订单总数 |
-| `completion_rate` | 按时履约率 |
-| `average_picking_time` | 平均拣选耗时 (s) |
+专门针对 `fixed_hybrid` 模式，遍历 1~12 月，每个月份可使用不同的长租资源参数。逐月的 `long_term_robots` 和 `long_term_pickers_area` 在 `configs/fixed_hybrid_batch.json` 中配置。
 
-### 最佳配置 CSV (`<stem>_best_config.csv`)
+```powershell
+# 使用默认配置文件
+python -m agent.ppo.train_fixed_hybrid
 
-记录最优 episode 中每个决策步的完整资源配置快照，包括：
+# 自定义配置文件
+python -m agent.ppo.train_fixed_hybrid --config path/to/my_config.json
 
-- 算法宣称动作 vs 实际生效动作（`action_*_delta` vs `effective_*_delta`）
-- 各区域长/短租赁机器人/拣货员实时存量
-- 各成本分量与履约率
+# 4 进程并行
+python -m agent.ppo.train_fixed_hybrid --workers 4 --cpu-threads 1
 
-### 模型权重 (`<stem>.pth`)
+# 指定月份
+python -m agent.ppo.train_fixed_hybrid --months 1,6,11,12
 
-保存最优 episode 对应的 `policy` 和 `value` 网络参数及训练配置。
+# 预览
+python -m agent.ppo.train_fixed_hybrid --dry-run
+```
 
----
+不同于 `train_batch`，此脚本仅遍历月份（模式固定为 `fixed_hybrid`），未提供 `--modes` 和 `--force-cpu` 参数。
 
-## 关键设计决策
+### Baseline Batch: `agent.baselines.train_batch`
 
-- **统一配置管理**: 所有参数集中在 `default.json`，通过 `Config` 基类加载，保证实验可复现
-- **模块化 CNN + Attention**: 视觉编码器对所有算法共享相同结构，保证对比公平性
-- **Orthogonal 初始化**: 全连接层使用 $\sqrt{2}$ 正交初始化，改善深层网络训练稳定性
-- **GAE 优势估计**: PPO 使用广义优势估计（λ=0.95），平衡偏差-方差权衡
-- **熵正则衰减**: 初始熵系数 0.05，每次更新后 ×0.995 衰减至最低 0.001，实现从探索到利用的平滑过渡
+遍历指定算法 + 模式下的 1~12 月，每轮训练通过 `importlib` 动态加载对应算法模块并调用其 `train()` 入口。
+
+```powershell
+# DDPG long 模式，全部 12 个月，2 进程
+python -m agent.baselines.train_batch --algorithm ddpg --mode long
+
+# A2C short 模式，仅 6 月和 9 月，4 进程
+python -m agent.baselines.train_batch --algorithm a2c --mode short --months 6,9 --workers 4
+
+# TD3 hybrid 模式，自定义 episodes
+python -m agent.baselines.train_batch --algorithm td3 --mode hybrid --months 9 --episodes 1000
+
+# SAC fixed_hybrid 模式，预览
+python -m agent.baselines.train_batch --algorithm sac --mode fixed_hybrid --dry-run
+```
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--algorithm` | **必填** | 算法名：`ddpg` / `td3` / `sac` / `a2c` |
+| `--mode` | **必填** | 训练模式：`short` / `long` / `hybrid` / `fixed_hybrid` |
+| `--months` | `1,2,...,12` | 逗号分隔的月份列表 |
+| `--episodes` | 配置文件中的值 | 覆盖训练 episode 数 |
+| `--workers` | `2` | 并行进程数 |
+| `--cpu-threads` | `2` | 每个进程的 PyTorch 线程数 |
+| `--force-cpu` | 关闭 | 强制 CPU 模式 |
+| `--dry-run` | 关闭 | 仅预览不执行 |
+
+### 并行与线程说明
+
+所有批量脚本使用 Python `multiprocessing` 的 `"spawn"` 上下文启动子进程（Windows 必须，Linux/Mac 同样安全）。每个子进程拥有独立的 Python 解释器和 PyTorch 上下文，避免了 GIL 和 CUDA 状态共享问题。
+
+每个子进程的 PyTorch 线程数通过 `torch.set_num_threads()` 和 `OMP_NUM_THREADS` / `MKL_NUM_THREADS` 环境变量控制。建议 `workers × cpu-threads ≤ CPU 核心数`，超出时可能因线程过订阅导致性能下降。
+
+单 GPU 环境建议加 `--force-cpu` 避免多进程争抢同一 GPU；多 GPU 环境可自行修改代码按进程分配 `CUDA_VISIBLE_DEVICES`。
+
+## Outputs
+
+- PPO: `result/ppo/<mode>_i<items>_m<month>_seed<seed>.csv`
+- PPO checkpoint: `result/ppo/<mode>_i<items>_m<month>_seed<seed>.pth`
+- PPO best resource configuration: `result/ppo/<mode>_i<items>_m<month>_seed<seed>_best_config.csv`
+- Baselines: `result/baselines/<algorithm>_<mode>_i<items>_m<month>_seed<seed>.csv`
+- Baseline best resource configuration: `result/baselines/<algorithm>_<mode>_i<items>_m<month>_seed<seed>_best_config.csv`
+
+## Tests
+
+```powershell
+python -m py_compile environment\class_public.py environment\class_warehouse.py environment\warehouse_env.py data\generate_orders.py agent\training_utils.py agent\ppo\train.py agent\baselines\common.py
+python -m unittest discover -s test -p "test_*.py"
+```
