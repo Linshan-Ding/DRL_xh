@@ -1,0 +1,159 @@
+{
+  "warehouse": {
+    "_comments": {
+      "shelf_capacity": "单个巷道单侧货架在长度方向上的储货位数量。",
+      "shelf_levels": "每个储货位的货架层数。",
+      "area_num": "仓库划分的作业区域数量。",
+      "aisle_num": "每个作业区域包含的巷道数量。",
+      "shelf_length": "单个储货位的长度，单位为米。",
+      "shelf_width": "单个储货位的宽度，单位为米。",
+      "aisle_width": "巷道或通道宽度，单位为米。",
+      "entrance_width": "仓库入口或 depot 区域宽度，单位为米。",
+      "depot_position": "机器人起点和订单打包返回点坐标。"
+    },
+    "shelf_capacity": 20,
+    "shelf_levels": 3,
+    "area_num": 3,
+    "aisle_num": 3,
+    "shelf_length": 1,
+    "shelf_width": 1,
+    "aisle_width": 2,
+    "entrance_width": 2,
+    "depot_position": [18, 0]
+  },
+  "robot": {
+    "_comments": {
+      "short_term_unit_run_cost": "短租机器人单位运行时间成本，单位为元/秒。",
+      "long_term_unit_run_cost": "长租机器人单位运行时间成本，单位为元/秒。",
+      "robot_speed": "机器人移动速度，单位为米/秒。"
+    },
+    "short_term_unit_run_cost": 0.0104,
+    "long_term_unit_run_cost": 0.0046,
+    "robot_speed": 1.2
+  },
+  "picker": {
+    "_comments": {
+      "short_term_unit_time_cost": "短租拣货员单位工作时间成本，单位为元/秒。",
+      "long_term_unit_time_cost": "长租拣货员单位工作时间成本，单位为元/秒。",
+      "picker_speed": "拣货员移动速度，单位为米/秒。",
+      "unit_fire_cost": "拣货员解雇或退租的一次性成本，单位为元。"
+    },
+    "short_term_unit_time_cost": 0.0125,
+    "long_term_unit_time_cost": 0.0081,
+    "picker_speed": 0.75,
+    "unit_fire_cost": 0
+  },
+  "order": {
+    "_comments": {
+      "unit_delay_cost": "订单延期单位时间惩罚成本，单位为元/秒。",
+      "pack_time": "机器人返回 depot 后的订单打包时间，单位为秒。",
+      "poisson_parameter": "订单到达间隔参数范围，用于随机生成订单到达过程，单位为秒。",
+      "due_time_list": "订单从到达到交期之间可选的时长列表，单位为秒。",
+      "order_n_arrival": "每次到达时的订单数量范围。",
+      "order_n_items": "单个订单包含商品数量的默认范围。"
+    },
+    "unit_delay_cost": 0.06,
+    "pack_time": 20,
+    "poisson_parameter": [60, 180],
+    "due_time_list": [1800, 3600, 7200],
+    "order_n_arrival": [1, 10],
+    "order_n_items": [2, 10]
+  },
+  "item": {
+    "_comments": {
+      "pick_time": "单件商品拣选时间，单位为秒。"
+    },
+    "pick_time": 10
+  },
+  "ppo": {
+    "_comments": {
+      "gamma": "奖励折扣因子。",
+      "clip_range": "PPO 策略概率比裁剪范围。",
+      "learning_rate": "策略网络和值函数网络的学习率。",
+      "n_epochs": "每次 PPO 更新时对 buffer 数据重复训练的轮数。",
+      "batch_size": "PPO mini-batch 大小。",
+      "gae_lambda": "广义优势估计 GAE 的 lambda 参数。",
+      "normalize_rewards": "是否对奖励按幅值归一化。",
+      "standardize_rewards": "是否对奖励进行均值方差标准化。",
+      "initial_entropy_coeff": "初始熵正则系数，用于鼓励策略探索。",
+      "min_entropy_coeff": "熵正则系数衰减后的最小值。",
+      "entropy_coeff_decay": "每次 PPO 更新后的熵正则系数衰减率。",
+      "hidden_dim": "策略网络和值函数网络全连接隐藏层维度。",
+      "feature_dim": "CNN 视觉特征映射后的特征维度。",
+      "attention_heads": "策略网络自注意力层的注意力头数量。",
+      "initial_log_std": "策略动作分布初始 log 标准差。",
+      "min_log_std": "策略动作分布 log 标准差的最小裁剪值。",
+      "max_log_std": "策略动作分布 log 标准差的最大裁剪值。",
+      "max_grad_norm": "梯度裁剪的最大范数。",
+      "value_loss_coeff": "价值函数损失在 PPO 总损失中的权重。"
+    },
+    "gamma": 1,
+    "clip_range": 0.2,
+    "learning_rate": 0.0003,
+    "n_epochs": 3,
+    "batch_size": 64,
+    "gae_lambda": 0.95,
+    "normalize_rewards": true,
+    "standardize_rewards": true,
+    "initial_entropy_coeff": 0.05,
+    "min_entropy_coeff": 0.001,
+    "entropy_coeff_decay": 0.995,
+    "hidden_dim": 128,
+    "feature_dim": 32,
+    "attention_heads": 4,
+    "initial_log_std": 0.5,
+    "min_log_std": -1.0,
+    "max_log_std": 1.0,
+    "max_grad_norm": 0.5,
+    "value_loss_coeff": 0.5
+  },
+  "experiment": {
+    "_comments": {
+      "mode": "默认训练模式，可选 short、long、hybrid、fixed_hybrid。",
+      "item_scenarios": "可用订单商品数量算例列表，对应 data/instances/items_<item_scenario>/。",
+      "months": "可用月份算例编号列表，对应 orders_m<month>.pkl。",
+      "item_scenario": "默认使用的订单商品数量算例。",
+      "month": "默认使用的月份算例编号。",
+      "episodes": "默认训练 episode 数量。",
+      "seed": "默认随机种子。",
+      "total_days": "单个仿真周期包含的工作天数。",
+      "work_seconds_per_day": "每天有效工作时长，单位为秒。",
+      "max_days": "short、hybrid 和 fixed_hybrid 模式下单个 episode 的最大决策天数。",
+      "fixed_hybrid": "固定长租+短租模式配置；第一天按人工参数创建长租资源，后续天数由算法调整短租资源。",
+      "action_scale": "baseline 连续动作映射到环境整数调整量时使用的缩放系数。",
+      "device": "训练设备；auto 表示自动选择 cuda 或 cpu。",
+      "visdom": "是否默认启用 Visdom 可视化。"
+    },
+    "mode": "long",
+    "item_scenarios": [2, 4, 6, 10],
+    "months": [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
+    "item_scenario": 10,
+    "month": 9,
+    "episodes": 1000,
+    "seed": 0,
+    "total_days": 30,
+    "work_seconds_per_day": 28800,
+    "max_days": 31,
+    "fixed_hybrid": {
+      "_comments": {
+        "long_term_robots": "固定长租+短租模式下第一天人工设置的长租机器人数量。",
+        "long_term_pickers_area": "固定长租+短租模式下第一天人工设置的各区域长租拣货员数量，顺序对应 area1、area2、area3 等区域。"
+      },
+      "long_term_robots": 3,
+      "long_term_pickers_area": [1, 1, 1]
+    },
+    "action_scale": 5,
+    "device": "auto",
+    "visdom": true
+  },
+  "paths": {
+    "_comments": {
+      "instance_dir": "订单算例文件目录。",
+      "ppo_output_dir": "PPO 训练结果和模型权重输出目录。",
+      "baseline_output_dir": "baseline 算法训练结果和模型权重输出目录。"
+    },
+    "instance_dir": "data/instances",
+    "ppo_output_dir": "result/ppo",
+    "baseline_output_dir": "result/baselines"
+  }
+}

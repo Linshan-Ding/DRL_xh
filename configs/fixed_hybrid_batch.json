@@ -1,0 +1,73 @@
+{
+  "_comment": "每个月份独立设置 long_term_robots 和 long_term_pickers_area。未列出的月份使用 default 配置。",
+  "default": {
+    "long_term_robots": 9,
+    "long_term_pickers_area": [2, 2, 2]
+  },
+  "months": {
+    "1": {
+      "long_term_robots": 9,
+      "long_term_pickers_area": [2, 2, 2]
+    },
+    "2": {
+      "long_term_robots": 10,
+      "long_term_pickers_area": [2, 2, 2]
+    },
+    "3": {
+      "long_term_robots": 10,
+      "long_term_pickers_area": [3, 3, 3]
+    },
+    "4": {
+      "long_term_robots": 10,
+      "long_term_pickers_area": [2, 2, 2]
+    },
+    "5": {
+      "long_term_robots": 11,
+      "long_term_pickers_area": [3, 3, 3]
+    },
+    "6": {
+      "long_term_robots": 11,
+      "long_term_pickers_area": [3, 3, 3]
+    },
+    "7": {
+      "long_term_robots": 9,
+      "long_term_pickers_area": [3, 3, 3]
+    },
+    "8": {
+      "long_term_robots": 9,
+      "long_term_pickers_area": [2, 2, 2]
+    },
+    "9": {
+      "long_term_robots": 9,
+      "long_term_pickers_area": [3, 3, 3]
+    },
+    "10": {
+      "long_term_robots": 11,
+      "long_term_pickers_area": [2, 2, 2]
+    },
+    "11": {
+      "long_term_robots": 8,
+      "long_term_pickers_area": [2, 2, 2]
+    },
+    "12": {
+      "long_term_robots": 9,
+      "long_term_pickers_area": [2, 2, 2]
+    }
+  },
+  "_examples": {
+    "_高负荷月份（如促销季 6月、11月）可能需要更多资源": {},
+    "6_example": {
+      "long_term_robots": 5,
+      "long_term_pickers_area": [3, 3, 2]
+    },
+    "11_example": {
+      "long_term_robots": 6,
+      "long_term_pickers_area": [4, 3, 3]
+    },
+    "_低负荷月份（如淡季 2月）可以减少资源": {},
+    "2_example": {
+      "long_term_robots": 2,
+      "long_term_pickers_area": [1, 1, 1]
+    }
+  }
+}
