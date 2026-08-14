@@ -4,7 +4,7 @@ import argparse
 import sys
 from functools import partial
 from pathlib import Path
-from typing import Tuple
+from typing import Sequence, Tuple
 
 import numpy as np
 import torch
@@ -176,6 +176,87 @@ def normalized_to_env_action(
     return np.clip(scaled, -action_scale, action_scale).astype(np.float32)
 
 
+def discrete_action_cardinalities(
+    mode: str,
+    decision_index: int,
+    action_dim: int,
+    action_scale: int,
+    long_robot_max: int,
+    long_picker_max: int,
+) -> np.ndarray:
+    """Return the number of valid discrete choices for every action branch."""
+    if action_dim < 1:
+        raise ValueError("action_dim must be positive")
+    if action_scale < 1:
+        raise ValueError("action_scale must be positive")
+    if long_robot_max < 1 or long_picker_max < 1:
+        raise ValueError("long-term resource limits must be positive")
+
+    absolute_long_action = mode == "long" or (mode == "hybrid" and decision_index == 0)
+    if absolute_long_action:
+        return np.asarray(
+            [long_robot_max] + [long_picker_max] * (action_dim - 1),
+            dtype=np.int64,
+        )
+    return np.full(action_dim, 2 * action_scale + 1, dtype=np.int64)
+
+
+def max_discrete_action_cardinalities(
+    mode: str,
+    action_dim: int,
+    action_scale: int,
+    long_robot_max: int,
+    long_picker_max: int,
+) -> np.ndarray:
+    """Return fixed network head sizes that cover every decision in a mode."""
+    first = discrete_action_cardinalities(
+        mode,
+        0,
+        action_dim,
+        action_scale,
+        long_robot_max,
+        long_picker_max,
+    )
+    if mode != "hybrid":
+        return first
+    later = discrete_action_cardinalities(
+        mode,
+        1,
+        action_dim,
+        action_scale,
+        long_robot_max,
+        long_picker_max,
+    )
+    return np.maximum(first, later)
+
+
+def discrete_indices_to_env_action(
+    action_indices: np.ndarray,
+    mode: str,
+    decision_index: int,
+    action_scale: int,
+    long_robot_max: int,
+    long_picker_max: int,
+) -> np.ndarray:
+    """Map a multi-discrete DQN action to the warehouse integer action."""
+    indices = np.asarray(action_indices, dtype=np.int64).reshape(-1)
+    cardinalities = discrete_action_cardinalities(
+        mode,
+        decision_index,
+        len(indices),
+        action_scale,
+        long_robot_max,
+        long_picker_max,
+    )
+    if np.any(indices < 0) or np.any(indices >= cardinalities):
+        raise ValueError("action index is outside the valid range for this decision")
+
+    absolute_long_action = mode == "long" or (mode == "hybrid" and decision_index == 0)
+    if absolute_long_action:
+        return (indices + 1).astype(np.float32)
+    return (indices - action_scale).astype(np.float32)
+
+
 def use_deterministic_action(episode: int, total_episodes: int, tail_fraction: float) -> bool:
     if not 0 <= tail_fraction < 1:
         raise ValueError("deterministic_tail_fraction must be in [0, 1)")
@@ -344,6 +425,31 @@ class QNetwork(nn.Module):
         return self.q(torch.cat([hidden, action], dim=-1))
 
 
+class BranchingQNetwork(nn.Module):
+    """Factorized Q network for the warehouse's multi-discrete action vector."""
+
+    def __init__(
+        self,
+        input_height: int,
+        input_width: int,
+        scalar_dim: int,
+        branch_sizes: Sequence[int],
+    ):
+        super().__init__()
+        self.encoder = StateEncoder(input_height, input_width, scalar_dim)
+        self.heads = nn.ModuleList(
+            [layer_init(nn.Linear(128, int(size)), std=1.0) for size in branch_sizes]
+        )
+
+    def forward(
+        self,
+        matrix: torch.Tensor,
+        scalar: torch.Tensor,
+    ) -> tuple[torch.Tensor, ...]:
+        hidden = self.encoder(matrix, scalar)
+        return tuple(head(hidden) for head in self.heads)
+
+
 class ReplayBuffer:
     def __init__(self, capacity: int, matrix_shape: Tuple[int, ...], scalar_dim: int, action_dim: int):
         self.capacity = capacity
@@ -394,6 +500,64 @@ class ReplayBuffer:
             rewards,
             torch.as_tensor(self.next_matrix[idx], dtype=torch.float32, device=device),
             torch.as_tensor(self.next_scalar[idx], dtype=torch.float32, device=device),
+            torch.as_tensor(self.done[idx], dtype=torch.float32, device=device),
+        )
+
+
+class DiscreteReplayBuffer:
+    def __init__(self, capacity: int, matrix_shape: Tuple[int, ...], scalar_dim: int, action_dim: int):
+        self.capacity = capacity
+        self.ptr = 0
+        self.size = 0
+        self.matrix = np.zeros((capacity, *matrix_shape), dtype=np.float32)
+        self.scalar = np.zeros((capacity, scalar_dim), dtype=np.float32)
+        self.action = np.zeros((capacity, action_dim), dtype=np.int64)
+        self.reward = np.zeros((capacity, 1), dtype=np.float32)
+        self.next_matrix = np.zeros((capacity, *matrix_shape), dtype=np.float32)
+        self.next_scalar = np.zeros((capacity, scalar_dim), dtype=np.float32)
+        self.next_cardinalities = np.ones((capacity, action_dim), dtype=np.int64)
+        self.done = np.zeros((capacity, 1), dtype=np.float32)
+
+    def add(
+        self,
+        matrix: np.ndarray,
+        scalar: np.ndarray,
+        action: np.ndarray,
+        reward: float,
+        next_matrix: np.ndarray,
+        next_scalar: np.ndarray,
+        next_cardinalities: np.ndarray,
+        done: bool,
+    ) -> None:
+        self.matrix[self.ptr] = matrix
+        self.scalar[self.ptr] = scalar
+        self.action[self.ptr] = action
+        self.reward[self.ptr] = reward
+        self.next_matrix[self.ptr] = next_matrix
+        self.next_scalar[self.ptr] = next_scalar
+        self.next_cardinalities[self.ptr] = next_cardinalities
+        self.done[self.ptr] = float(done)
+        self.ptr = (self.ptr + 1) % self.capacity
+        self.size = min(self.size + 1, self.capacity)
+
+    def sample(
+        self,
+        batch_size: int,
+        device: torch.device,
+        reward_normalizer: RunningRewardNormalizer | None = None,
+    ):
+        idx = np.random.randint(0, self.size, size=batch_size)
+        rewards = torch.as_tensor(self.reward[idx], dtype=torch.float32, device=device)
+        if reward_normalizer is not None:
+            rewards = reward_normalizer.normalize(rewards)
+        return (
+            torch.as_tensor(self.matrix[idx], dtype=torch.float32, device=device),
+            torch.as_tensor(self.scalar[idx], dtype=torch.float32, device=device),
+            torch.as_tensor(self.action[idx], dtype=torch.long, device=device),
+            rewards,
+            torch.as_tensor(self.next_matrix[idx], dtype=torch.float32, device=device),
+            torch.as_tensor(self.next_scalar[idx], dtype=torch.float32, device=device),
+            torch.as_tensor(self.next_cardinalities[idx], dtype=torch.long, device=device),
             torch.as_tensor(self.done[idx], dtype=torch.float32, device=device),
         )
 

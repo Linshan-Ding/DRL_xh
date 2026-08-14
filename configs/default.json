@@ -156,7 +156,7 @@
     "_comments": {
       "instance_dir": "订单算例文件目录。",
       "ppo_output_dir": "PPO 训练结果和模型权重输出目录。",
-      "baseline_output_dir": "baseline 算法训练结果和模型权重输出目录。"
+      "baseline_output_dir": "baseline 算法训练结果输出目录。"
     },
     "instance_dir": "data/instances",
     "ppo_output_dir": "result/ppo",

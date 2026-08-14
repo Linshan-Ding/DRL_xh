@@ -63,6 +63,8 @@ def validate_config(parameters: Mapping[str, Any]) -> None:
         raise ValueError("experiment.episodes must be positive")
     if int(experiment["max_days"]) <= 0:
         raise ValueError("experiment.max_days must be positive")
+    if int(experiment["action_scale"]) < 1:
+        raise ValueError("experiment.action_scale must be at least 1")
     if int(experiment["long_robot_max"]) < 1:
         raise ValueError("experiment.long_robot_max must be at least 1")
     if int(experiment["long_picker_max"]) < 1:

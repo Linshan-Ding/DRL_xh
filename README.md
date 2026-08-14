@@ -2,7 +2,7 @@
 
 Paper Title: **The Impact of Dynamic Workforce Allocation in Human-Robot Collaborative Warehouses: A Human-Centric Perspective**
 
-本项目用于研究人机协同仓库中的动态资源配置问题，包含统一配置、订单算例生成、PPO 训练入口，以及 A2C / DDPG / TD3 / SAC 对比算法。
+本项目用于研究人机协同仓库中的动态资源配置问题，包含统一配置、订单算例生成、PPO 训练入口，以及 A2C / DDPG / TD3 / SAC / DQN / DDQN 对比算法。
 
 ## Configuration
 
@@ -25,7 +25,7 @@ DRL_Warehouse/
 │   └── fixed_hybrid_batch.json       # fixed_hybrid 批量训练的逐月长租参数
 ├── agent/
 │   ├── ppo/                          # PPO 训练入口与网络
-│   └── baselines/                    # A2C / DDPG / TD3 / SAC 对比算法
+│   └── baselines/                    # A2C / DDPG / TD3 / SAC / DQN / DDQN
 ├── data/
 │   ├── generate_orders.py            # 订单算例生成入口
 │   └── instances/                    # items_<n>/orders_m<month>.pkl
@@ -78,18 +78,21 @@ python agent\baselines\a2c.py --lr 0.0003
 python agent\baselines\ddpg.py --actor-lr 0.0001 --critic-lr 0.001
 python agent\baselines\td3.py --policy-delay 2
 python agent\baselines\sac.py --alpha-lr 0.0003
+python agent\baselines\dqn.py --learning-rate 0.0003
+python agent\baselines\ddqn.py --target-update-interval 100
 ```
 
-四个对比算法（A2C / DDPG / TD3 / SAC）使用与 PPO 相同的状态归一化尺度，但不会修改或覆盖 PPO 实现及其已有结果。长租模式的主要训练规则如下：
+六个对比算法（A2C / DDPG / TD3 / SAC / DQN / DDQN）使用与 PPO 相同的状态归一化尺度，但不会修改或覆盖 PPO 实现及其已有结果。长租模式的主要训练规则如下：
 
 - A2C 跨 64 个单步 episode 累积一个更新批次，避免单样本 advantage 归零。
-- DDPG / TD3 / SAC 在 64 个 transition 后结束随机探索阶段，第 65 个长租 episode 起使用 actor。
+- DDPG / TD3 / SAC / DQN / DDQN 在 64 个 transition 后结束纯随机探索阶段，第 65 个长租 episode 起使用已学习策略并按各算法的探索规则继续采样。
+- DQN / DDQN 使用多离散分支 Q 网络，分别选择机器人和各区域拣货员动作，避免枚举全部联合动作；DDQN 使用在线网络选取下一动作、目标网络评估该动作。
 - long 模式和 hybrid 第一次决策的动作表示绝对资源数；机器人范围为 1~15，每个区域的拣货员范围为 1~5。
 - 最后 10% episode 关闭探索并冻结参数更新，训练 CSV 尾段直接反映最终确定性策略。
 - baseline 不执行独立评估，也不保存模型 checkpoint；结果来自逐 episode CSV 和训练过程生成的 `_best_config.csv`。
 - `_best_config.csv` 只从最后 10% 的确定性收敛段中选择，不使用前期随机探索的偶然最小成本。
 
-`--learning-starts` 可调整 DDPG / TD3 / SAC 的随机探索 transition 数；旧参数名 `--warmup-steps` 作为兼容别名继续可用。
+`--learning-starts` 可调整 DDPG / TD3 / SAC / DQN / DDQN 的纯随机探索 transition 数；旧参数名 `--warmup-steps` 作为兼容别名继续可用。
 
 ## Modes
 
@@ -179,11 +182,14 @@ python -m agent.baselines.train_batch --algorithm td3 --mode hybrid --months 9 -
 
 # SAC fixed_hybrid 模式，预览
 python -m agent.baselines.train_batch --algorithm sac --mode fixed_hybrid --dry-run
+
+# DDQN long 模式，全部 12 个月
+python -m agent.baselines.train_batch --algorithm ddqn --mode long
 ```
 
 | 参数 | 默认值 | 说明 |
 |------|--------|------|
-| `--algorithm` | **必填** | 算法名：`ddpg` / `td3` / `sac` / `a2c` |
+| `--algorithm` | **必填** | 算法名：`a2c` / `ddpg` / `td3` / `sac` / `dqn` / `ddqn` |
 | `--mode` | **必填** | 训练模式：`short` / `long` / `hybrid` / `fixed_hybrid` |
 | `--months` | `1,2,...,12` | 逗号分隔的月份列表 |
 | `--episodes` | 配置文件中的值 | 覆盖训练 episode 数 |
@@ -208,11 +214,11 @@ python -m agent.baselines.train_batch --algorithm sac --mode fixed_hybrid --dry-
 - Baselines: `result/baselines/<algorithm>_<mode>_i<items>_m<month>_seed<seed>.csv`
 - Baseline best resource configuration: `result/baselines/<algorithm>_<mode>_i<items>_m<month>_seed<seed>_best_config.csv`
 
-批量运行 baseline 时，月份 `m` 使用 `experiment.seed + m - 1` 作为训练 seed；三个 off-policy 算法和 A2C 在同一月份仍使用相同 seed，保证横向比较可复现。
+批量运行 baseline 时，月份 `m` 使用 `experiment.seed + m - 1` 作为训练 seed；五个 off-policy 算法和 A2C 在同一月份仍使用相同 seed，保证横向比较可复现。
 
 ## Tests
 
 ```powershell
-python -m py_compile environment\class_public.py environment\class_warehouse.py environment\warehouse_env.py data\generate_orders.py agent\training_utils.py agent\ppo\train.py agent\baselines\common.py
+python -m py_compile environment\class_public.py environment\class_warehouse.py environment\warehouse_env.py data\generate_orders.py agent\training_utils.py agent\ppo\train.py agent\baselines\common.py agent\baselines\dqn.py agent\baselines\ddqn.py agent\baselines\train_batch.py
 python -m unittest discover -s test -p "test_*.py"
 ```

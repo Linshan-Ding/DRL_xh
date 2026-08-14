@@ -1,7 +1,7 @@
 """
 Batch launcher for baseline algorithm training across multiple months.
 
-Runs any baseline algorithm (ddpg/td3/sac/a2c) in any mode
+Runs any baseline algorithm (a2c/ddpg/td3/sac/dqn/ddqn) in any mode
 (short/long/hybrid/fixed_hybrid) for each specified month.
 
 Usage:
@@ -34,7 +34,7 @@ from typing import Any
 REPO_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(REPO_ROOT))
 
-VALID_ALGORITHMS = ("ddpg", "td3", "sac", "a2c")
+VALID_ALGORITHMS = ("a2c", "ddpg", "td3", "sac", "dqn", "ddqn")
 VALID_MODES = ("short", "long", "hybrid", "fixed_hybrid")
 ALL_MONTHS = list(range(1, 13))
 
