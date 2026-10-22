@@ -237,7 +237,12 @@ class WarehouseEnv(gym.Env, Config):
         for robot in self.robots:
             if abs(robot.move_to_pick_point_time - current_time) < 1e-5:
                 robot.move_to_pick_point_time = float("inf")
-                pick_point = robot.next_pick_point(self.pick_points)
+                # Arrive at the pick point chosen at departure; the travel time was
+                # computed for this point, so it must not be re-selected on arrival.
+                pick_point = robot.target_pick_point
+                if pick_point is None:
+                    raise RuntimeError("robot arrived without a departure target pick point")
+                robot.target_pick_point = None
                 robot.position = pick_point.position
                 robot.pick_point = pick_point
                 pick_point.robot_queue.append(robot)
@@ -264,6 +269,7 @@ class WarehouseEnv(gym.Env, Config):
 
                 if len(robot.item_pick_order) > 0:
                     next_pick_point = robot.next_pick_point(self.pick_points)
+                    robot.target_pick_point = next_pick_point
                     dist = self.shortest_path_between_pick_points(robot, next_pick_point)
                     move_time = dist / robot.speed
                     robot.move_to_pick_point_time = current_time + move_time
@@ -382,6 +388,7 @@ class WarehouseEnv(gym.Env, Config):
             order = self.orders_unassigned.pop(0)
             robot.assign_order(order)
             next_pick_point = robot.next_pick_point(self.pick_points)
+            robot.target_pick_point = next_pick_point
             shortest_path_length = self.shortest_path_between_pick_points(robot, next_pick_point)
             move_time = shortest_path_length / robot.speed
             robot.state = 'busy'

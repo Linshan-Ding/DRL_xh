@@ -167,6 +167,23 @@ def max_decisions(mode: str, max_days: int) -> int:
     return 1 if mode == "long" else max_days
 
 
+def use_deterministic_action(episode: int, total_episodes: int, tail_fraction: float) -> bool:
+    """True for the final `tail_fraction` of episodes.
+
+    PPO and every baseline use this same rule: tail episodes act deterministically,
+    do not update parameters, and are the only candidates for the reported result.
+    """
+    if not 0 <= tail_fraction < 1:
+        raise ValueError("deterministic_tail_fraction must be in [0, 1)")
+    deterministic_start = max(1, int(np.floor(total_episodes * (1.0 - tail_fraction))) + 1)
+    return episode >= deterministic_start
+
+
+def is_result_candidate(deterministic: bool, tail_fraction: float) -> bool:
+    """Whether an episode may be reported; every episode qualifies when the tail is disabled."""
+    return deterministic or tail_fraction == 0
+
+
 def fixed_hybrid_long_term_action(parameters: dict[str, Any], area_ids: list[str]) -> np.ndarray:
     fixed_config = parameters["experiment"][FIXED_HYBRID_MODE]
     robot_count = int(fixed_config["long_term_robots"])

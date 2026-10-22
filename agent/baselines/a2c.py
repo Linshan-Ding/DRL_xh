@@ -17,6 +17,7 @@ from agent.baselines.common import (
     collect_resource_config,
     init_base_env,
     initialize_episode_resources,
+    is_result_candidate,
     load_orders,
     make_episode_env,
     make_visdom,
@@ -211,8 +212,8 @@ def train(args):
                     args.action_scale,
                     args.mode,
                     decision,
-                    args.long_robot_max,
-                    args.long_picker_max,
+                    args.long_robot_center,
+                    args.long_picker_center,
                 )
                 decision_start_time = env.current_time
                 next_state, reward, done = step_env(env, env_action, args.mode, decision)
@@ -299,7 +300,7 @@ def train(args):
             viz.line([metrics["total_cost"]], [episode], win=win, update="append")
             print_episode("a2c", metrics)
 
-            best_candidate = deterministic or args.deterministic_tail_fraction == 0
+            best_candidate = is_result_candidate(deterministic, args.deterministic_tail_fraction)
             if best_candidate and metrics["total_cost"] < best_cost:
                 best_cost = metrics["total_cost"]
                 write_best_config_csv(best_config_csv_path, episode_config_rows)

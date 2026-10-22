@@ -18,6 +18,7 @@ from agent.training_utils import (
     collect_resource_config,
     init_base_env,
     initialize_episode_resources,
+    is_result_candidate,
     load_orders,
     make_episode_env,
     make_visdom,
@@ -26,6 +27,7 @@ from agent.training_utils import (
     output_paths,
     set_seed,
     step_env,
+    use_deterministic_action,
     write_best_config_csv,
 )
 from environment.class_public import load_config, print_config_source
@@ -85,6 +87,7 @@ def print_training_parameters(
         f"  experiment.month: {experiment['month']}",
         f"  experiment.episodes: {experiment['episodes']}",
         f"  experiment.seed: {experiment['seed']}",
+        f"  experiment.deterministic_tail_fraction: {experiment['deterministic_tail_fraction']}",
         f"  experiment.max_days: {experiment['max_days']}",
         f"  experiment.decision_limit: {decision_limit}",
         f"  experiment.total_days: {experiment['total_days']}",
@@ -172,6 +175,7 @@ def train(parameters: dict[str, Any]) -> Path:
     month = int(experiment["month"])
     episodes = int(experiment["episodes"])
     seed = int(experiment["seed"])
+    tail_fraction = float(experiment["deterministic_tail_fraction"])
     decision_limit = max_decisions(mode, int(experiment["max_days"]))
     set_seed(seed)
 
@@ -208,6 +212,10 @@ def train(parameters: dict[str, Any]) -> Path:
         writer = csv.writer(f)
         writer.writerow(CSV_HEADER)
         for episode in range(1, episodes + 1):
+            # Same protocol as the baselines: the final tail of episodes uses the
+            # policy mean, adds nothing to the buffer, performs no update, and is the
+            # only set of episodes from which the reported result is selected.
+            deterministic = use_deterministic_action(episode, episodes, tail_fraction)
             env, state = make_episode_env(base_env, orders)
             if mode != "long":
                 agent.buffer.clear()
@@ -226,20 +234,24 @@ def train(parameters: dict[str, Any]) -> Path:
             for decision in range(first_decision_index, decision_limit):
                 if done:
                     break
-                action, log_prob, value_estimate, matrix_state, scalar_state = agent.select_action(state)
+                action, log_prob, value_estimate, matrix_state, scalar_state = agent.select_action(
+                    state,
+                    deterministic=deterministic,
+                )
                 decision_start_time = env.current_time
                 next_state, reward, done = step_env(env, action, mode, decision)
-                learned_steps += 1
-                agent.buffer.add(
-                    matrix_state,
-                    scalar_state,
-                    action,
-                    log_prob,
-                    reward,
-                    _done_for_update(mode, done),
-                    value_estimate,
-                    maxlen=agent.batch_size if mode == "long" else None,
-                )
+                if not deterministic:
+                    learned_steps += 1
+                    agent.buffer.add(
+                        matrix_state,
+                        scalar_state,
+                        action,
+                        log_prob,
+                        reward,
+                        _done_for_update(mode, done),
+                        value_estimate,
+                        maxlen=agent.batch_size if mode == "long" else None,
+                    )
                 decision_metrics = collect_metrics(env, episode, item_count, month, mode, seed)
                 episode_config_rows.append(
                     collect_resource_config(
@@ -268,7 +280,7 @@ def train(parameters: dict[str, Any]) -> Path:
             if updated and agent.last_update_stats:
                 print(_format_update_diagnostics(episode, agent.last_update_stats))
 
-            if metrics["total_cost"] < best_cost:
+            if is_result_candidate(deterministic, tail_fraction) and metrics["total_cost"] < best_cost:
                 best_cost = metrics["total_cost"]
                 torch.save(
                     {

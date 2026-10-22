@@ -121,14 +121,15 @@ class PPOAgent(Config):
                 return rewards / scale
         return rewards
 
-    def select_action(self, state):
+    def select_action(self, state, deterministic: bool = False):
+        """Sample an action, or return the policy mean when `deterministic` is True."""
         self.policy_old.eval()
         with torch.no_grad():
             self._clamp_policy_log_std()
             matrix_inputs, scalar_inputs = self._state_to_tensors(state)
             mean, std = self.policy_old(matrix_inputs, scalar_inputs)
             dist = Normal(mean, std)
-            action = dist.sample()
+            action = mean if deterministic else dist.sample()
             log_prob = dist.log_prob(action).sum(dim=1)
             value = self.value_network(matrix_inputs, scalar_inputs)
 

@@ -25,6 +25,7 @@ from agent.training_utils import (  # noqa: E402
     collect_metrics,
     init_base_env as _init_base_env,
     initialize_episode_resources as _initialize_episode_resources,
+    is_result_candidate,
     layer_init,
     load_orders as _load_orders,
     make_episode_env,
@@ -34,6 +35,7 @@ from agent.training_utils import (  # noqa: E402
     repo_path,
     set_seed,
     step_env,
+    use_deterministic_action,
     write_best_config_csv,
 )
 
@@ -60,6 +62,8 @@ def add_common_args(parser: argparse.ArgumentParser) -> argparse.ArgumentParser:
         output_dir=paths["baseline_output_dir"],
         visdom=experiment["visdom"],
         action_scale=experiment["action_scale"],
+        long_robot_center=experiment["long_robot_center"],
+        long_picker_center=experiment["long_picker_center"],
         long_robot_max=experiment["long_robot_max"],
         long_picker_max=experiment["long_picker_max"],
         deterministic_tail_fraction=experiment["deterministic_tail_fraction"],
@@ -155,23 +159,39 @@ def state_to_tensors(state: dict, device: torch.device) -> tuple[torch.Tensor, t
     )
 
 
+# Keeps artanh finite when a squashed action is exactly +/-1 (clipped noise, float saturation).
+_ARTANH_EDGE = 1e-12
+
+
 def normalized_to_env_action(
     action: np.ndarray,
     action_scale: int,
     mode: str = "short",
     decision_index: int = 0,
-    long_robot_max: int = 15,
-    long_picker_max: int = 5,
+    long_robot_center: float = 8.0,
+    long_picker_center: float = 3.0,
 ) -> np.ndarray:
-    clipped = np.clip(np.asarray(action, dtype=np.float32), -1.0, 1.0)
+    """Map a squashed continuous action in [-1, 1] to the environment's integer action.
+
+    Long-term absolute decisions (long mode, and the first hybrid decision) use the
+    uncapped map n = c + (c - 1) * artanh(a): a = 0 gives the centre c, a -> 1 grows
+    without bound, and the environment's minimum of one unit is the only limit.  Near
+    a = 0 it has the same value and slope as the former bounded map onto [1, 2c - 1],
+    so it only differs where that map used to saturate.  This matches PPO, whose
+    Gaussian action is applied to the environment without an upper bound.
+    """
+    clipped = np.clip(np.asarray(action, dtype=np.float64), -1.0, 1.0)
     absolute_long_action = mode == "long" or (mode == "hybrid" and decision_index == 0)
     if absolute_long_action:
-        maximums = np.asarray(
-            [long_robot_max] + [long_picker_max] * (len(clipped) - 1),
-            dtype=np.float32,
+        if long_robot_center <= 1 or long_picker_center <= 1:
+            raise ValueError("long-term resource centres must be greater than 1")
+        centers = np.asarray(
+            [long_robot_center] + [long_picker_center] * (len(clipped) - 1),
+            dtype=np.float64,
         )
-        scaled = 1.0 + (clipped + 1.0) * 0.5 * (maximums - 1.0)
-        return np.rint(scaled).astype(np.float32)
+        latent = np.arctanh(np.clip(clipped, -1.0 + _ARTANH_EDGE, 1.0 - _ARTANH_EDGE))
+        counts = centers + (centers - 1.0) * latent
+        return np.maximum(1.0, np.rint(counts)).astype(np.float32)
     scaled = np.rint(clipped * action_scale)
     return np.clip(scaled, -action_scale, action_scale).astype(np.float32)
 
@@ -184,7 +204,12 @@ def discrete_action_cardinalities(
     long_robot_max: int,
     long_picker_max: int,
 ) -> np.ndarray:
-    """Return the number of valid discrete choices for every action branch."""
+    """Return the number of valid discrete choices for every action branch.
+
+    A discrete Q-network needs a finite action set, so DQN and DDQN keep a finite grid
+    of 1..long_robot_max robots and 1..long_picker_max pickers per zone for long-term
+    absolute decisions.  The continuous baselines and PPO have no such cap.
+    """
     if action_dim < 1:
         raise ValueError("action_dim must be positive")
     if action_scale < 1:
@@ -255,13 +280,6 @@ def discrete_indices_to_env_action(
     if absolute_long_action:
         return (indices + 1).astype(np.float32)
     return (indices - action_scale).astype(np.float32)
-
-
-def use_deterministic_action(episode: int, total_episodes: int, tail_fraction: float) -> bool:
-    if not 0 <= tail_fraction < 1:
-        raise ValueError("deterministic_tail_fraction must be in [0, 1)")
-    deterministic_start = max(1, int(np.floor(total_episodes * (1.0 - tail_fraction))) + 1)
-    return episode >= deterministic_start
 
 
 def use_random_action(global_step: int, learning_starts: int) -> bool:
