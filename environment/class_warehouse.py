@@ -116,6 +116,8 @@ class Robot(Config):
         self.parameter = self.parameters["robot"]  # 机器人参数
         self.position = position  # 机器人的位置
         self.pick_point = None  # 机器人当前拣货位
+        # 机器人出发时选定的目标拣货位；到达时直接使用，不再按到达时刻的状态重新选择
+        self.target_pick_point = None
         self.order = None  # 机器人关联的订单
         self.item_pick_order = []  # 机器人剩余未拣选商品的对象列表
         self.state = 'idle'  # 机器人所处状态：'idle', 'busy'

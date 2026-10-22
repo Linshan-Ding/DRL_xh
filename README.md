@@ -68,6 +68,12 @@ data/instances/items_10/orders_m01.pkl ... orders_m12.pkl
 python -m agent.ppo.train
 ```
 
+PPO 与 baseline 使用同一套结果选取规则（`experiment.deterministic_tail_fraction`，默认 0.1）：
+
+- 最后 10% episode（1000 个 episode 时为第 901~1000 个）直接使用策略均值动作，不写入 buffer，也不更新参数。
+- `_best_config.csv` 和 `.pth` checkpoint 只从这段确定性尾段中选择成本最低的 episode。
+- 将 `deterministic_tail_fraction` 设为 0 时，全部 episode 都参与训练和选取，即旧版 PPO 的行为。
+
 ## Train Baselines
 
 baseline 的训练模式、算例、episode、seed、输出目录和设备同样来自 `configs/default.json`。各算法独有超参数仍可通过 CLI 调整：
@@ -87,10 +93,12 @@ python agent\baselines\ddqn.py --target-update-interval 100
 - A2C 跨 64 个单步 episode 累积一个更新批次，避免单样本 advantage 归零。
 - DDPG / TD3 / SAC / DQN / DDQN 在 64 个 transition 后结束纯随机探索阶段，第 65 个长租 episode 起使用已学习策略并按各算法的探索规则继续采样。
 - DQN / DDQN 使用多离散分支 Q 网络，分别选择机器人和各区域拣货员动作，避免枚举全部联合动作；DDQN 使用在线网络选取下一动作、目标网络评估该动作。
-- long 模式和 hybrid 第一次决策的动作表示绝对资源数；机器人范围为 1~15，每个区域的拣货员范围为 1~5。
-- 最后 10% episode 关闭探索并冻结参数更新，训练 CSV 尾段直接反映最终确定性策略。
+- long 模式和 hybrid 第一次决策的动作表示绝对资源数，与 PPO 一样不设上限，下限 1 由环境保证：
+  - A2C / DDPG / TD3 / SAC 将压缩到 [-1, 1] 的动作 a 映射为 n = c + (c-1)·artanh(a)。中心 c 为 `long_robot_center`（8）和 `long_picker_center`（3），a = 0 时的取值和斜率与旧版 1~15 / 1~5 映射相同，但不再饱和。
+  - DQN / DDQN 的离散 Q 网络必须使用有限动作集，仍按 `long_robot_max`（15）和 `long_picker_max`（5）构造 1~15 台机器人、每区 1~5 名拣货员的离散网格。
+- 最后 10% episode 关闭探索并冻结参数更新，训练 CSV 尾段直接反映最终确定性策略；PPO 使用同一规则。
 - baseline 不执行独立评估，也不保存模型 checkpoint；结果来自逐 episode CSV 和训练过程生成的 `_best_config.csv`。
-- `_best_config.csv` 只从最后 10% 的确定性收敛段中选择，不使用前期随机探索的偶然最小成本。
+- `_best_config.csv` 只从最后 10% 的确定性收敛段中选择，不使用前期随机探索的偶然最小成本；PPO 同样如此。
 
 `--learning-starts` 可调整 DDPG / TD3 / SAC / DQN / DDQN 的纯随机探索 transition 数；旧参数名 `--warmup-steps` 作为兼容别名继续可用。
 
@@ -103,6 +111,10 @@ short | long | hybrid | fixed_hybrid
 ```
 
 `fixed_hybrid` 模式下，第一天按 `experiment.fixed_hybrid.long_term_robots` 和 `experiment.fixed_hybrid.long_term_pickers_area` 创建固定长租资源，后续天数由算法调整短租资源。
+
+## Simulation Rules
+
+机器人在出发时（领取订单时、或在当前拣货位拣完后）按路由规则确定下一个拣货位，并按该拣货位计算行驶时间；到达时直接进入这个拣货位，不会按到达时刻的队列等状态重新选择。
 
 ## Batch Training
 

@@ -121,9 +121,11 @@
       "max_days": "short、hybrid 和 fixed_hybrid 模式下单个 episode 的最大决策天数。",
       "fixed_hybrid": "固定长租+短租模式配置；第一天按人工参数创建长租资源，后续天数由算法调整短租资源。",
       "action_scale": "baseline 连续动作映射到环境整数调整量时使用的缩放系数。",
-      "long_robot_max": "baseline 在 long 模式和 hybrid 首次决策中允许配置的最大长租机器人数量。",
-      "long_picker_max": "baseline 在 long 模式和 hybrid 首次决策中允许为单个区域配置的最大长租拣货员数量。",
-      "deterministic_tail_fraction": "baseline 训练末段关闭探索、直接使用确定性策略的 episode 比例。",
+      "long_robot_center": "连续动作 baseline（A2C/DDPG/TD3/SAC）在 long 模式和 hybrid 首次决策中，归一化动作为 0 时对应的长租机器人数量；映射 n = c + (c-1)·artanh(a) 无上限，下限 1 由环境保证。",
+      "long_picker_center": "连续动作 baseline 在 long 模式和 hybrid 首次决策中，归一化动作为 0 时对应的单区长租拣货员数量；映射同上，无上限。",
+      "long_robot_max": "仅用于 DQN/DDQN：离散 Q 网络必须使用有限动作集，long 模式和 hybrid 首次决策的长租机器人离散取值为 1~long_robot_max。",
+      "long_picker_max": "仅用于 DQN/DDQN：long 模式和 hybrid 首次决策中单区长租拣货员离散取值为 1~long_picker_max。",
+      "deterministic_tail_fraction": "PPO 与所有 baseline 共用：训练末段关闭探索、冻结参数更新、直接使用确定性策略的 episode 比例；报告结果与 _best_config.csv 只从该末段中选择。设为 0 时全部 episode 均为候选。",
       "device": "训练设备；auto 表示自动选择 cuda 或 cpu。",
       "visdom": "是否默认启用 Visdom 可视化。"
     },
@@ -146,6 +148,8 @@
       "long_term_pickers_area": [1, 1, 1]
     },
     "action_scale": 5,
+    "long_robot_center": 8,
+    "long_picker_center": 3,
     "long_robot_max": 15,
     "long_picker_max": 5,
     "deterministic_tail_fraction": 0.1,

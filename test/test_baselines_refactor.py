@@ -35,16 +35,33 @@ from agent.baselines.train_batch import VALID_ALGORITHMS, build_training_args, m
 
 
 class BaselineCommonTest(unittest.TestCase):
-    def test_long_action_maps_uniformly_to_absolute_resource_bounds(self):
+    def test_long_action_maps_to_uncapped_absolute_resources(self):
         action = normalized_to_env_action(
             np.asarray([-1.0, 0.0, 1.0, -0.5]),
             action_scale=5,
             mode="long",
             decision_index=0,
-            long_robot_max=15,
-            long_picker_max=5,
+            long_robot_center=8,
+            long_picker_center=3,
         )
-        np.testing.assert_array_equal(action, [1, 3, 5, 2])
+        # -1 floors at one unit, 0 gives the centre, +1 lies far beyond the old cap of 5.
+        np.testing.assert_array_equal(action, [1, 3, 31, 2])
+
+    def test_long_action_centre_and_growth_beyond_former_caps(self):
+        def robots(a: float) -> float:
+            return float(
+                normalized_to_env_action(
+                    np.asarray([a, 0.0, 0.0, 0.0]), 5, "long", 0, 8, 3
+                )[0]
+            )
+
+        self.assertEqual(robots(0.0), 8)
+        # The former bounded map saturated at 15 robots; the new one keeps growing.
+        self.assertGreater(robots(0.9), 15)
+        self.assertGreater(robots(0.999), robots(0.9))
+        values = [robots(a) for a in np.linspace(-1, 1, 41)]
+        self.assertEqual(values, sorted(values))
+        self.assertGreaterEqual(min(values), 1)
 
     def test_hybrid_only_uses_absolute_mapping_for_first_decision(self):
         normalized = np.asarray([-1.0, 0.0, 1.0, -0.5])
@@ -53,19 +70,25 @@ class BaselineCommonTest(unittest.TestCase):
             action_scale=5,
             mode="hybrid",
             decision_index=0,
-            long_robot_max=15,
-            long_picker_max=5,
+            long_robot_center=8,
+            long_picker_center=3,
         )
         later = normalized_to_env_action(
             normalized,
             action_scale=5,
             mode="hybrid",
             decision_index=1,
-            long_robot_max=15,
-            long_picker_max=5,
+            long_robot_center=8,
+            long_picker_center=3,
         )
-        np.testing.assert_array_equal(first, [1, 3, 5, 2])
+        np.testing.assert_array_equal(first, [1, 3, 31, 2])
         np.testing.assert_array_equal(later, [-5, 0, 5, -2])
+
+    def test_continuous_baselines_read_centres_from_config(self):
+        for module in (a2c, ddpg, td3, sac):
+            args = module.build_parser().parse_args([])
+            self.assertEqual(args.long_robot_center, 8)
+            self.assertEqual(args.long_picker_center, 3)
 
     def test_state_normalization_matches_ppo_scales(self):
         shape = (9, 20)

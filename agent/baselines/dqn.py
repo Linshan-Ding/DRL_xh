@@ -23,6 +23,7 @@ from agent.baselines.common import (
     hard_update,
     init_base_env,
     initialize_episode_resources,
+    is_result_candidate,
     linear_exploration_scale,
     load_orders,
     make_episode_env,
@@ -370,7 +371,7 @@ def train_dqn(args, algorithm: str, double_dqn: bool) -> None:
             viz.line([metrics["total_cost"]], [episode], win=win, update="append")
             print_episode(algorithm, metrics)
 
-            best_candidate = deterministic or args.deterministic_tail_fraction == 0
+            best_candidate = is_result_candidate(deterministic, args.deterministic_tail_fraction)
             if best_candidate and metrics["total_cost"] < best_cost:
                 best_cost = metrics["total_cost"]
                 write_best_config_csv(best_config_csv_path, episode_config_rows)
